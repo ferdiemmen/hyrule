@@ -1,0 +1,170 @@
+diff --git a/node_modules/@angular/build/src/builders/dev-server/builder.js b/node_modules/@angular/build/src/builders/dev-server/builder.js
+index 163c470..5c74a66 100755
+--- a/node_modules/@angular/build/src/builders/dev-server/builder.js
++++ b/node_modules/@angular/build/src/builders/dev-server/builder.js
+@@ -12,6 +12,7 @@ const check_port_1 = require("../../utils/check-port");
+ const internal_1 = require("./internal");
+ const options_1 = require("./options");
+ const vite_server_1 = require("./vite-server");
++const application_1 = require("../application");
+ /**
+  * A Builder that executes a development server based on the provided browser target option.
+  *
+@@ -37,7 +38,7 @@ async function* execute(options, context, extensions) {
+     if (options.prebundle && !normalizedOptions.cacheOptions.enabled) {
+         context.logger.warn(`Prebundling has been configured but will not be used because caching has been disabled.`);
+     }
+-    yield* (0, vite_server_1.serveWithVite)(normalizedOptions, builderName, (options, context, plugins) => (0, internal_1.buildApplicationInternal)(options, context, { codePlugins: plugins }), context, { indexHtml: extensions?.indexHtmlTransformer }, extensions);
++    yield* (0, vite_server_1.serveWithVite)(normalizedOptions, builderName, (options, context, plugins) => (0, application_1.buildApplication)(options, context, { codePlugins: plugins }), context, { indexHtml: extensions?.indexHtmlTransformer }, extensions);
+ }
+ async function initialize(initialOptions, projectName, context) {
+     // Purge old build disk cache.
+diff --git a/node_modules/@angular/build/src/builders/dev-server/options.js b/node_modules/@angular/build/src/builders/dev-server/options.js
+index 70d8aa6..ddd59f7 100755
+--- a/node_modules/@angular/build/src/builders/dev-server/options.js
++++ b/node_modules/@angular/build/src/builders/dev-server/options.js
+@@ -73,7 +73,7 @@ async function normalizeOptions(context, projectName, options) {
+         }
+     }
+     // Initial options to keep
+-    const { host, port, poll, open, verbose, watch, liveReload, hmr, headers, proxyConfig, servePath, ssl, sslCert, sslKey, prebundle, } = options;
++    const { host, port, poll, open, verbose, watch, liveReload, hmr, headers, proxyConfig, ssr, server, servePath, ssl, sslCert, sslKey, prebundle, } = options;
+     // Return all the normalized options
+     return {
+         buildTarget,
+@@ -90,6 +90,8 @@ async function normalizeOptions(context, projectName, options) {
+         projectRoot,
+         cacheOptions,
+         proxyConfig,
++        ssr,
++        server,
+         servePath,
+         ssl,
+         sslCert,
+diff --git a/node_modules/@angular/build/src/builders/dev-server/vite-server.js b/node_modules/@angular/build/src/builders/dev-server/vite-server.js
+index c9c4220..314632c 100755
+--- a/node_modules/@angular/build/src/builders/dev-server/vite-server.js
++++ b/node_modules/@angular/build/src/builders/dev-server/vite-server.js
+@@ -71,12 +71,12 @@ async function* serveWithVite(serverOptions, builderName, builderAction, context
+         // This is so instead of prerendering all the routes for every change, the page is "prerendered" when it is requested.
+         browserOptions.prerender = false;
+         // Avoid bundling and processing the ssr entry-point as this is not used by the dev-server.
+-        browserOptions.ssr = true;
++        // browserOptions.ssr = true;
+         // https://nodejs.org/api/process.html#processsetsourcemapsenabledval
+         process.setSourceMapsEnabled(true);
+     }
+     // Set all packages as external to support Vite's prebundle caching
+-    browserOptions.externalPackages = serverOptions.prebundle;
++    // browserOptions.externalPackages = serverOptions.prebundle;
+     // The development server currently only supports a single locale when localizing.
+     // This matches the behavior of the Webpack-based development server but could be expanded in the future.
+     if (browserOptions.localize === true ||
+@@ -163,8 +163,8 @@ async function* serveWithVite(serverOptions, builderName, builderAction, context
+                 // TODO: Implement support -- application builder currently does not use
+                 break;
+             default:
+-                context.logger.warn(`Unknown result kind [${result.kind}] provided by build.`);
+-                continue;
++                // context.logger.warn(`Unknown result kind [${result.kind}] provided by build.`);
++                break;
+         }
+         // Clear existing error overlay on successful result
+         if (hadError && server) {
+@@ -242,7 +242,7 @@ async function* serveWithVite(serverOptions, builderName, builderAction, context
+             if (browserOptions.ssr && serverOptions.prebundle !== false) {
+                 // Warm up the SSR request and begin optimizing dependencies.
+                 // Without this, Vite will only start optimizing SSR modules when the first request is made.
+-                void server.warmupRequest('./main.server.mjs', { ssr: true });
++                // void server.warmupRequest('./main.server.mjs', { ssr: true });
+             }
+             const urls = server.resolvedUrls;
+             if (urls && (urls.local.length || urls.network.length)) {
+@@ -275,6 +275,7 @@ async function* serveWithVite(serverOptions, builderName, builderAction, context
+     }
+     await new Promise((resolve) => (deferred = resolve));
+ }
++let timer;
+ function handleUpdate(normalizePath, generatedFiles, server, serverOptions, logger) {
+     const updatedFiles = [];
+     // Invalidate any updated files
+@@ -285,34 +286,53 @@ function handleUpdate(normalizePath, generatedFiles, server, serverOptions, logg
+             updatedModules?.forEach((m) => server?.moduleGraph.invalidateModule(m));
+         }
+     }
+-    if (!updatedFiles.length) {
+-        return;
+-    }
+-    if (serverOptions.liveReload || serverOptions.hmr) {
+-        if (updatedFiles.every((f) => f.endsWith('.css'))) {
+-            const timestamp = Date.now();
+-            server.hot.send({
+-                type: 'update',
+-                updates: updatedFiles.map((filePath) => {
+-                    return {
+-                        type: 'css-update',
+-                        timestamp,
+-                        path: filePath,
+-                        acceptedPath: filePath,
+-                    };
+-                }),
+-            });
+-            logger.info('HMR update sent to client(s).');
+-            return;
+-        }
+-    }
++    // if (!updatedFiles.length) {
++    //     return;
++    // }
++    // if (serverOptions.liveReload || serverOptions.hmr) {
++    //     if (updatedFiles.every((f) => f.endsWith('.css'))) {
++    //         const timestamp = Date.now();
++    //         server.hot.send({
++    //             type: 'update',
++    //             updates: updatedFiles.map((filePath) => {
++    //                 return {
++    //                     type: 'css-update',
++    //                     timestamp,
++    //                     path: filePath,
++    //                     acceptedPath: filePath,
++    //                 };
++    //             }),
++    //         });
++    //         logger.info('HMR update sent to client(s).');
++    //         return;
++    //     }
++    // }
++
++    const debounceReload = (time) => {
++        return () => {
++            if (timer) {
++                clearTimeout(timer);
++                timer = null;
++            }
++            timer = setTimeout(() => {
++                server.hot.send({
++                    type: 'full-reload',
++                    path: '*',
++                });
++                logger.info('Page reload sent to client(s).');
++            }, time);
++        };
++    };
++    const pageReload = debounceReload(1000);
++
+     // Send reload command to clients
+     if (serverOptions.liveReload) {
+-        server.hot.send({
+-            type: 'full-reload',
+-            path: '*',
+-        });
+-        logger.info('Page reload sent to client(s).');
++        // server.hot.send({
++        //     type: 'full-reload',
++        //     path: '*',
++        // });
++        // logger.info('Page reload sent to client(s).');
++        pageReload();
+     }
+ }
+ function analyzeResultFiles(normalizePath, htmlIndexPath, resultFiles, generatedFiles) {
